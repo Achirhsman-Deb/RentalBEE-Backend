@@ -29,6 +29,7 @@ app.use("/feedbacks", require("./Routes/feedbacks"));
 app.use("/reports", require("./Routes/reports"));
 app.use("/user", require("./Routes/users"));
 app.use("/notifications", require("./Routes/notifications"));
+app.use("/support", require("./Routes/Support"));
 
 // Default route
 app.get("/", (req, res) => {
