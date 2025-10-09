@@ -1,4 +1,4 @@
-const User = require('../Models/User');
+const User = require('../Models/Users_model');
 
 const supportAgentMiddleware = async (req, res, next) => {
   try {
