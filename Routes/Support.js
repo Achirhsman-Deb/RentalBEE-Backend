@@ -1,11 +1,12 @@
 const express = require("express");
 const { authMiddleware } = require("../Middlewares/auth");
 const supportAgentMiddleware = require("../Middlewares/SupportAgentMiddleware");
-const { getAllBookings, reservationController, getUsersWithDocuments, getUserDocumentsById, updateDocumentStatus } = require("../Controllers/SupportController");
+const { reservationController, getUsersWithDocuments, getUserDocumentsById, updateDocumentStatus, getAllBookingsLite, getBookingById } = require("../Controllers/SupportController");
 const router = express.Router();
 
 //Booking Routes
-router.get("/get-orders", authMiddleware, supportAgentMiddleware, getAllBookings);
+router.get("/get-bookings", authMiddleware, supportAgentMiddleware, getAllBookingsLite);
+router.get("/get-booking/:id", authMiddleware, supportAgentMiddleware, getBookingById);
 router.post("/reservations/:bookingId", authMiddleware, supportAgentMiddleware, reservationController);
 
 //Files Routes

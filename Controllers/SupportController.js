@@ -1,25 +1,41 @@
 const Booking = require('../Models/Bookings_model');
 const User = require("../Models/Users_model");
+const { File } = require("megajs");
 
-exports.getAllBookings = async (req, res) => {
+const getFileInfo = async (fileUrl) => {
+  return new Promise((resolve, reject) => {
+    const file = File.fromURL(fileUrl);
+    file.loadAttributes((err, attr) => {
+      if (err) return reject(err);
+
+      const parts = file.name.split("_");
+      const originalName = parts.slice(3).join("_");
+
+      resolve({
+        fileName: originalName,
+        fileSize: file.size
+      });
+    });
+  });
+};
+
+exports.getAllBookingsLite = async (req, res) => {
   try {
-    const { status, page = 1, limit = 20 } = req.body;
+    const { status, page = 1, limit = 20 } = req.query;
 
     const filter = {};
-    if (status) {
-      filter.status = status;
-    }
+    if (status) filter.status = status;
 
     const currentPage = Math.max(parseInt(page), 1);
     const perPage = Math.max(parseInt(limit), 1);
 
     const totalBookings = await Booking.countDocuments(filter);
 
+    // Fetch minimal fields to reduce payload size
     const bookings = await Booking.find(filter)
-      .populate('carId', 'model images category')
-      .populate('clientId', 'firstName lastName email phoneNumber')
-      .populate('pickupLocationId', 'locationName locationAddress')
-      .populate('dropoffLocationId', 'locationName locationAddress')
+      .populate("carId", "model category") // basic car info only
+      .populate("clientId", "firstName lastName") // minimal client info
+      .select("bookingDate status totalPrice createdAt") // select essential fields
       .sort({ createdAt: -1 })
       .skip((currentPage - 1) * perPage)
       .limit(perPage)
@@ -33,10 +49,41 @@ exports.getAllBookings = async (req, res) => {
       bookings,
     });
   } catch (error) {
-    console.error('Error fetching bookings:', error);
+    console.error("Error fetching bookings (lite):", error);
     res.status(500).json({
       success: false,
-      message: 'Internal server error',
+      message: "Internal server error",
+    });
+  }
+};
+
+exports.getBookingById = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const booking = await Booking.findById(id)
+      .populate("carId", "model images category engineCapacity fuelType gearBoxType passengerCapacity")
+      .populate("clientId", "firstName lastName email phoneNumber address")
+      .populate("pickupLocationId", "locationName locationAddress")
+      .populate("dropoffLocationId", "locationName locationAddress")
+      .lean();
+
+    if (!booking) {
+      return res.status(404).json({
+        success: false,
+        message: "Booking not found",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      booking,
+    });
+  } catch (error) {
+    console.error("Error fetching booking details:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal server error",
     });
   }
 };
