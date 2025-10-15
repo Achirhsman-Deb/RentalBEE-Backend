@@ -1,6 +1,7 @@
 const Booking = require('../Models/Bookings_model');
 const User = require("../Models/Users_model");
 const { File } = require("megajs");
+const Car = require("../Models/Cars_model");
 
 const getFileInfo = async (fileUrl) => {
   return new Promise((resolve, reject) => {
@@ -41,12 +42,20 @@ exports.getAllBookingsLite = async (req, res) => {
       .limit(perPage)
       .lean();
 
+    const cars = await Car.find({}, "model _id").lean();
+
+    const Cars = cars.map(car => ({
+      id: car._id,
+      name: car.model
+    }));
+
     res.status(200).json({
       success: true,
       total: totalBookings,
       currentPage,
       totalPages: Math.ceil(totalBookings / perPage),
       bookings,
+      Cars
     });
   } catch (error) {
     console.error("Error fetching bookings (lite):", error);
