@@ -208,7 +208,7 @@ const createBooking = async (req, res) => {
       pickupDateTime,
       dropoffDateTime: dropOffDateTime,
       bookingNumber: nextBookingNumber,
-      status: 'RESERVED',
+      status: 'BOOKED',
     });
 
     const bookingDateFormatted = moment(pickup).format('DD.MM.YY');
