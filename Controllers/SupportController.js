@@ -2,6 +2,8 @@ const Booking = require('../Models/Bookings_model');
 const User = require("../Models/Users_model");
 const { File } = require("megajs");
 const Car = require("../Models/Cars_model");
+const { createAndSendNotification } = require('../config/SendGrid_Config');
+const moment = require('moment');
 
 const getFileInfo = async (fileUrl) => {
   return new Promise((resolve, reject) => {
@@ -71,10 +73,11 @@ exports.getBookingById = async (req, res) => {
     const { id } = req.params;
 
     const booking = await Booking.findById(id)
-      .populate("carId", "model images category engineCapacity fuelType gearBoxType passengerCapacity")
+      .populate("carId", "_id model images category engineCapacity fuelType gearBoxType passengerCapacity carRating pricePerDay")
       .populate("clientId", "firstName lastName email phoneNumber address")
       .populate("pickupLocationId", "locationName locationAddress")
       .populate("dropoffLocationId", "locationName locationAddress")
+      .populate("pickupDateTime dropoffDateTime")
       .lean();
 
     if (!booking) {
@@ -102,58 +105,78 @@ exports.reservationController = async (req, res) => {
     const { bookingId } = req.params;
     const { status } = req.body;
 
+    // 1. Validate inputs
     if (!bookingId || !status) {
       return res.status(400).json({
         success: false,
-        message: 'Booking ID and status are required',
+        message: "Booking ID and status are required",
       });
     }
 
+    // 2. Validate allowed statuses
     const validStatuses = [
-      'RESERVED',
-      'SERVICESTARTED',
-      'SERVICEPROVIDED',
-      'CANCELED',
+      "RESERVED",
+      "SERVICESTARTED",
+      "SERVICEPROVIDED",
+      "CANCELED",
     ];
 
     if (!validStatuses.includes(status)) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid status provided',
+        message: "Invalid status provided",
       });
     }
 
-    const booking = await Booking.findById(bookingId);
+    // 3. Find booking and populate car details
+    const booking = await Booking.findById(bookingId).populate("carId", "model");
 
     if (!booking) {
       return res.status(404).json({
         success: false,
-        message: 'Booking not found',
+        message: "Booking not found",
       });
     }
 
+    // 4. Update booking status
     booking.status = status;
     await booking.save();
 
-    const updatedBooking = await Booking.findById(bookingId)
-      .populate('carId', 'model images category')
-      .populate('clientId', 'firstName lastName email phoneNumber')
-      .populate('pickupLocationId', 'locationName locationAddress')
-      .populate('dropoffLocationId', 'locationName locationAddress');
+    // 5. Send notification asynchronously (non-blocking)
+    (async () => {
+      try {
+        await createAndSendNotification({
+          userId: booking.clientId,
+          title: `Reservation request ${status.toLowerCase()}`,
+          message: `Your booking request for ${booking.carId.model} from ${moment(
+            booking.pickupDateTime
+          ).format("MMM D")} to ${moment(booking.dropoffDateTime).format(
+            "MMM D"
+          )} has been successfully ${status.toLowerCase()}.`,
+          type: "info",
+        });
+      } catch (notifyErr) {
+        console.error(
+          `Failed to create notification for user ${booking.clientId}:`,
+          notifyErr
+        );
+      }
+    })();
 
-    res.status(200).json({
+    // 6. Respond to client
+    return res.status(200).json({
       success: true,
-      message: 'Booking status updated successfully',
-      booking: updatedBooking,
+      message: "Booking status updated successfully",
     });
   } catch (error) {
-    console.error('Error changing reservation status:', error);
-    res.status(500).json({
+    console.error("Error changing reservation status:", error);
+    return res.status(500).json({
       success: false,
-      message: 'Internal server error',
+      message: "Internal server error",
     });
   }
 };
+
 
 
 
@@ -281,7 +304,7 @@ exports.updateDocumentStatus = async (req, res) => {
     const { userId } = req.params;
     const { documentType, status } = req.body;
 
-    // Input validation
+    // 1️⃣ Validate inputs
     if (!documentType || !["aadhaarCard", "drivingLicense"].includes(documentType)) {
       return res.status(400).json({
         success: false,
@@ -296,7 +319,7 @@ exports.updateDocumentStatus = async (req, res) => {
       });
     }
 
-    // Find user
+    // 2️⃣ Find user
     const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json({
@@ -305,11 +328,40 @@ exports.updateDocumentStatus = async (req, res) => {
       });
     }
 
-    // Update status
+    // 3️⃣ Update document status
     user[documentType].status = status;
     await user.save();
 
-    // Response
+    // 4️⃣ Send notification asynchronously (non-blocking)
+    (async () => {
+      try {
+        const readableDocType =
+          documentType === "aadhaarCard" ? "Aadhaar Card" : "Driving License";
+
+        let title, message, type;
+
+        if (status === "VERIFIED") {
+          title = `${readableDocType} Verified 🎉`;
+          message = `Good news! Your ${readableDocType} has been successfully verified. You're now one step closer to smooth reservations and access to all features.`;
+          type = "success";
+        } else {
+          title = `${readableDocType} Verification Failed ❌`;
+          message = `We’re sorry! Your ${readableDocType} could not be verified. Please recheck your details and upload a clear, valid document to try again.`;
+          type = "warning";
+        }
+
+        await createAndSendNotification({
+          userId,
+          title,
+          message,
+          type,
+        });
+      } catch (notifyErr) {
+        console.error(`Failed to create notification for user ${userId}:`, notifyErr);
+      }
+    })();
+
+    // 5️⃣ Response
     return res.status(200).json({
       success: true,
       message: `Successfully updated ${documentType} status to ${status} for user.`,

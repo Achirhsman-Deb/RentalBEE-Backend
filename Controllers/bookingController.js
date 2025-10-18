@@ -248,52 +248,113 @@ const cancelBooking = async (req, res) => {
     const { userId } = req.body;
 
     const booking = await Booking.findById(bookingId);
-    if (!booking) return res.status(404).json({ error: "Booking not found" });
-
-    if (booking.status !== "RESERVED") {
-      return res.status(400).json({ error: "Only bookings with RESERVED status can be canceled" });
+    if (!booking) {
+      return res.status(404).json({ error: "Booking not found" });
     }
 
-    const createdAt = new Date(booking.createdAt);
-    const now = new Date();
-    const diffInHours = (now - createdAt) / (1000 * 60 * 60);
-
-    if (diffInHours > 12) {
-      return res.status(400).json({ error: `Cannot cancel booking as it was booked ${Math.floor(diffInHours)} hours ago` });
+    // Only RESERVED or BOOKED can request/cancel
+    if (!["RESERVED", "BOOKED"].includes(booking.status)) {
+      return res.status(400).json({
+        error: "Only bookings with RESERVED or BOOKED status can be canceled",
+      });
     }
 
-    if (booking.clientId.toString() !== userId) {
-      return res.status(403).json({ error: "You are not authorized to cancel this booking" });
+    // If status = RESERVED → directly store a cancel request (pending approval)
+    if (booking.status === "RESERVED") {
+      booking.cancelRequest = {
+        requestedAt: new Date(),
+        status: "PENDING",
+      };
+      await booking.save();
+
+      // Send notification
+      (async () => {
+        try {
+          await createAndSendNotification({
+            userId,
+            title: "Cancel Request Submitted",
+            message: `Your cancel request for reservation ${booking._id} has been submitted successfully.`,
+            type: "info",
+          });
+        } catch (notifyErr) {
+          console.error(`Failed to notify user ${userId}:`, notifyErr);
+        }
+      })();
+
+      return res.json({
+        message: "Cancel request submitted successfully for RESERVED booking",
+      });
     }
 
-    const car = await Car.findById(booking.carId).select("model");
-    const carName = car ? car.model : "the selected car";
+    // If status = BOOKED → check if within 12 hours, else just store cancel request
+    if (booking.status === "BOOKED") {
+      const createdAt = new Date(booking.createdAt);
+      const now = new Date();
+      const diffInHours = (now - createdAt) / (1000 * 60 * 60);
 
-    booking.status = "CANCELED";
-    await booking.save();
+      if (diffInHours > 12) {
+        // Too late to cancel immediately → store cancel request
+        booking.cancelRequest = {
+          requestedAt: new Date(),
+          status: "PENDING",
+        };
+        await booking.save();
 
-    (async () => {
-      try {
-        await createAndSendNotification({
-          userId: userId,
-          title: "Reservation request cancelled",
+        (async () => {
+          try {
+            await createAndSendNotification({
+              userId,
+              title: "Cancel Request Pending Review",
+              message: `Your cancel request for booking ${booking._id} has been recorded and is awaiting review.`,
+              type: "warning",
+            });
+          } catch (notifyErr) {
+            console.error(`Failed to notify user ${userId}:`, notifyErr);
+          }
+        })();
+
+        return res.status(200).json({
           message:
-            `Your booking request for ${carName} from ${moment(booking.pickup).format('MMM D')} to ${moment(booking.dropoff).format('MMM D')} has been succesfull cancelled.`,
-          type: "info",
+            "Cancel request recorded (cannot auto-cancel as it's over 12 hours old)",
         });
-      } catch (notifyErr) {
-        console.error(
-          `Failed to create notification for user ${result.userId}:`,
-          notifyErr
-        );
       }
-    })();
 
-    res.json({ message: "Booking canceled successfully" });
+      // If within 12 hours → cancel immediately
+      if (booking.clientId.toString() !== userId) {
+        return res.status(403).json({ error: "You are not authorized to cancel this booking" });
+      }
+
+      const car = await Car.findById(booking.carId).select("model");
+      const carName = car ? car.model : "the selected car";
+
+      booking.status = "CANCELED";
+      await booking.save();
+
+      (async () => {
+        try {
+          await createAndSendNotification({
+            userId,
+            title: "Booking Canceled",
+            message: `Your booking for ${carName} from ${moment(
+              booking.pickup
+            ).format("MMM D")} to ${moment(booking.dropoff).format(
+              "MMM D"
+            )} has been successfully canceled.`,
+            type: "success",
+          });
+        } catch (notifyErr) {
+          console.error(`Failed to create notification for user ${userId}:`, notifyErr);
+        }
+      })();
+
+      return res.json({ message: "Booking canceled successfully" });
+    }
   } catch (err) {
+    console.error("Error canceling booking:", err);
     res.status(500).json({ error: err.message });
   }
 };
+
 
 // ✅ Get booking details
 const getBookingDetails = async (req, res) => {
