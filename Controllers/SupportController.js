@@ -38,7 +38,7 @@ exports.getAllBookingsLite = async (req, res) => {
     const bookings = await Booking.find(filter)
       .populate("carId", "model category") // basic car info only
       .populate("clientId", "firstName lastName") // minimal client info
-      .select("bookingDate status totalPrice createdAt") // select essential fields
+      .select("bookingDate status totalPrice createdAt cancelRequest") // select essential fields
       .sort({ createdAt: -1 })
       .skip((currentPage - 1) * perPage)
       .limit(perPage)
@@ -104,6 +104,7 @@ exports.reservationController = async (req, res) => {
   try {
     const { bookingId } = req.params;
     const { status } = req.body;
+    const supportUserId = req.user?._id; // assuming auth middleware attaches support user
 
     // 1. Validate inputs
     if (!bookingId || !status) {
@@ -138,22 +139,49 @@ exports.reservationController = async (req, res) => {
       });
     }
 
-    // 4. Update booking status
+    // 4. Handle cancel request tracking if status is "CANCELED"
+    if (status === "CANCELED") {
+      booking.cancelRequest.status = "APPROVED";
+      booking.cancelRequest.reviewedAt = new Date();
+      booking.cancelRequest.reviewedBy = supportUserId || null;
+
+      // If user hadn’t already made a cancel request, fill the requestedAt timestamp
+      if (!booking.cancelRequest.requestedAt) {
+        booking.cancelRequest.requestedAt = new Date();
+      }
+    }
+
+    // 5. Update booking status
     booking.status = status;
     await booking.save();
 
-    // 5. Send notification asynchronously (non-blocking)
+    // 6. Prepare notification content
+    let title, message;
+
+    if (status === "CANCELED") {
+      title = `Your booking has been canceled`;
+      message = `Your booking for ${booking.carId.model} from ${moment(
+        booking.pickupDateTime
+      ).format("MMM D")} to ${moment(booking.dropoffDateTime).format(
+        "MMM D"
+      )} has been successfully canceled by our support team.`;
+    } else {
+      title = `Reservation request ${status.toLowerCase()}`;
+      message = `Your booking request for ${booking.carId.model} from ${moment(
+        booking.pickupDateTime
+      ).format("MMM D")} to ${moment(booking.dropoffDateTime).format(
+        "MMM D"
+      )} has been successfully ${status.toLowerCase()}.`;
+    }
+
+    // 7. Send notification asynchronously (non-blocking)
     (async () => {
       try {
         await createAndSendNotification({
           userId: booking.clientId,
-          title: `Reservation request ${status.toLowerCase()}`,
-          message: `Your booking request for ${booking.carId.model} from ${moment(
-            booking.pickupDateTime
-          ).format("MMM D")} to ${moment(booking.dropoffDateTime).format(
-            "MMM D"
-          )} has been successfully ${status.toLowerCase()}.`,
-          type: "info",
+          title,
+          message,
+          type: status === "CANCELED" ? "warning" : "info",
         });
       } catch (notifyErr) {
         console.error(
@@ -163,10 +191,11 @@ exports.reservationController = async (req, res) => {
       }
     })();
 
-    // 6. Respond to client
+    // 8. Respond to client
     return res.status(200).json({
       success: true,
       message: "Booking status updated successfully",
+      booking,
     });
   } catch (error) {
     console.error("Error changing reservation status:", error);
