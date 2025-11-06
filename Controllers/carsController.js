@@ -21,6 +21,15 @@ const checkAvailability = async (carId, startDate, endDate) => {
   return "AVAILABLE";
 };
 
+function toObjectId(id) {
+  if (!id) return null;
+  try {
+    return mongoose.Types.ObjectId.createFromHexString(id);
+  } catch {
+    return null;
+  }
+}
+
 // ✅ Get all cars with filters
 exports.getAllCars = async (req, res) => {
   try {
@@ -41,17 +50,13 @@ exports.getAllCars = async (req, res) => {
     const filter = {};
 
     // ✅ Handle pickup location
-    if (pickupLocationId && mongoose.isValidObjectId(pickupLocationId)) {
-      filter.locationIds = { $in: [new mongoose.Types.ObjectId(pickupLocationId)] };
-    }
+    const pickupObjId = toObjectId(pickupLocationId);
+    const dropoffObjId = toObjectId(dropoffLocationId);
 
-    // ✅ Handle dropoff location (merge if pickup exists)
-    if (dropoffLocationId && mongoose.isValidObjectId(dropoffLocationId)) {
-      if (filter.locationIds) {
-        filter.locationIds.$in.push(new mongoose.Types.ObjectId(dropoffLocationId));
-      } else {
-        filter.locationIds = { $in: [new mongoose.Types.ObjectId(dropoffLocationId)] };
-      }
+    if (pickupObjId || dropoffObjId) {
+      filter.locationIds = { $in: [] };
+      if (pickupObjId) filter.locationIds.$in.push(pickupObjId);
+      if (dropoffObjId) filter.locationIds.$in.push(dropoffObjId);
     }
 
     // ✅ Category / Gearbox / FuelType (always uppercase for consistency)
@@ -82,7 +87,7 @@ exports.getAllCars = async (req, res) => {
     // ✅ Parse dates safely
     const parsedPickup = pickupDateTime ? parseISO(pickupDateTime) : startOfDay(new Date());
     const parsedDropoff = dropOffDateTime ? parseISO(dropOffDateTime) : endOfDay(new Date());
-
+    
     // ✅ Map cars with availability
     const responseContent = await Promise.all(
       cars.map(async (car) => {
