@@ -4,6 +4,7 @@ const Review = require('../Models/Reviews_model');
 const Booking = require('../Models/Bookings_model');
 const mongoose = require('mongoose');
 const moment = require('moment');
+const redis = require("../config/Redis_Connect");
 
 const checkAvailability = async (carId, startDate, endDate) => {
   const bookings = await Booking.find({ carId });
@@ -47,9 +48,19 @@ exports.getAllCars = async (req, res) => {
       size = 10,
     } = req.query;
 
+    // 🔑 Create a unique cache key based on query parameters
+    const cacheKey = `cars:${JSON.stringify(req.query)}`;
+
+    // 🧠 Check if data exists in Redis cache
+    const cachedData = await redis.get(cacheKey);
+    if (cachedData) {
+      console.log("📦 Serving from Redis cache");
+      return res.status(200).json(JSON.parse(cachedData));
+    }
+
     const filter = {};
 
-    // ✅ Handle pickup location
+    // ✅ Handle pickup and dropoff location
     const pickupObjId = toObjectId(pickupLocationId);
     const dropoffObjId = toObjectId(dropoffLocationId);
 
@@ -59,7 +70,7 @@ exports.getAllCars = async (req, res) => {
       if (dropoffObjId) filter.locationIds.$in.push(dropoffObjId);
     }
 
-    // ✅ Category / Gearbox / FuelType (always uppercase for consistency)
+    // ✅ Category / Gearbox / FuelType
     if (category) filter.category = category.toUpperCase();
     if (gearBoxType) filter.gearBoxType = gearBoxType.toUpperCase();
     if (fuelType) filter.fuelType = fuelType.toUpperCase();
@@ -67,7 +78,7 @@ exports.getAllCars = async (req, res) => {
     // ✅ Price range filter
     if (minPrice || maxPrice) {
       filter.pricePerDay = {};
-      if (minPrice) filter.pricePerDay.$gte = Number(minPrice); // use gte not gt
+      if (minPrice) filter.pricePerDay.$gte = Number(minPrice);
       if (maxPrice) filter.pricePerDay.$lte = Number(maxPrice);
     }
 
@@ -78,21 +89,20 @@ exports.getAllCars = async (req, res) => {
     const totalElements = await Car.countDocuments(filter);
     const totalPages = Math.ceil(totalElements / pageSize);
 
-    // ✅ Fetch cars with pagination
+    // ✅ Fetch cars
     const cars = await Car.find(filter)
       .skip((pageNum - 1) * pageSize)
       .limit(pageSize)
       .populate("locationIds");
 
-    // ✅ Parse dates safely
+    // ✅ Parse pickup/dropoff dates
     const parsedPickup = pickupDateTime ? parseISO(pickupDateTime) : startOfDay(new Date());
     const parsedDropoff = dropOffDateTime ? parseISO(dropOffDateTime) : endOfDay(new Date());
-    
+
     // ✅ Map cars with availability
     const responseContent = await Promise.all(
       cars.map(async (car) => {
         const status = await checkAvailability(car._id, parsedPickup, parsedDropoff);
-
         const firstLocation = car.locationIds?.[0];
         const locationText = firstLocation
           ? `${firstLocation.locationName}, ${firstLocation.locationAddress}`
@@ -111,13 +121,19 @@ exports.getAllCars = async (req, res) => {
       })
     );
 
-    res.status(200).json({
+    const response = {
       content: responseContent,
       currentPage: pageNum,
       totalElements,
       totalPages,
-    });
+    };
 
+    // 🧊 Store computed data in Redis (cache for 5 minutes)
+    await redis.setex(cacheKey, 300, JSON.stringify(response));
+
+    console.log("💾 Data cached in Redis");
+
+    res.status(200).json(response);
   } catch (err) {
     console.error("getAllCars error:", err);
     res.status(500).json({ message: "Unable to get cars", error: err.message });
