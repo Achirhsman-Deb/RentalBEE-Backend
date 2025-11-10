@@ -4,7 +4,7 @@ const Review = require('../Models/Reviews_model');
 const Booking = require('../Models/Bookings_model');
 const mongoose = require('mongoose');
 const moment = require('moment');
-const redis = require("../config/Redis_Connect");
+const { redis, isRedisConnected } = require("../config/Redis_Connect");
 
 const checkAvailability = async (carId, startDate, endDate) => {
   const bookings = await Booking.find({ carId });
@@ -48,19 +48,20 @@ exports.getAllCars = async (req, res) => {
       size = 10,
     } = req.query;
 
-    // 🔑 Create a unique cache key based on query parameters
     const cacheKey = `cars:${JSON.stringify(req.query)}`;
 
-    // 🧠 Check if data exists in Redis cache
-    const cachedData = await redis.get(cacheKey);
-    if (cachedData) {
-      console.log("📦 Serving from Redis cache");
-      return res.status(200).json(JSON.parse(cachedData));
+    if (isRedisConnected()) {
+      try {
+        const cachedData = await redis.get(cacheKey);
+        if (cachedData) {
+          return res.status(200).json(JSON.parse(cachedData));
+        }
+      } catch (cacheErr) {
+        console.warn("⚠️ Redis cache read failed, skipping cache:", cacheErr.message);
+      }
     }
 
     const filter = {};
-
-    // ✅ Handle pickup and dropoff location
     const pickupObjId = toObjectId(pickupLocationId);
     const dropoffObjId = toObjectId(dropoffLocationId);
 
@@ -70,12 +71,10 @@ exports.getAllCars = async (req, res) => {
       if (dropoffObjId) filter.locationIds.$in.push(dropoffObjId);
     }
 
-    // ✅ Category / Gearbox / FuelType
     if (category) filter.category = category.toUpperCase();
     if (gearBoxType) filter.gearBoxType = gearBoxType.toUpperCase();
     if (fuelType) filter.fuelType = fuelType.toUpperCase();
 
-    // ✅ Price range filter
     if (minPrice || maxPrice) {
       filter.pricePerDay = {};
       if (minPrice) filter.pricePerDay.$gte = Number(minPrice);
@@ -85,21 +84,17 @@ exports.getAllCars = async (req, res) => {
     const pageNum = Math.max(parseInt(page, 10), 1);
     const pageSize = Math.max(parseInt(size, 10), 1);
 
-    // ✅ Count total cars before pagination
     const totalElements = await Car.countDocuments(filter);
     const totalPages = Math.ceil(totalElements / pageSize);
 
-    // ✅ Fetch cars
     const cars = await Car.find(filter)
       .skip((pageNum - 1) * pageSize)
       .limit(pageSize)
       .populate("locationIds");
 
-    // ✅ Parse pickup/dropoff dates
     const parsedPickup = pickupDateTime ? parseISO(pickupDateTime) : startOfDay(new Date());
     const parsedDropoff = dropOffDateTime ? parseISO(dropOffDateTime) : endOfDay(new Date());
 
-    // ✅ Map cars with availability
     const responseContent = await Promise.all(
       cars.map(async (car) => {
         const status = await checkAvailability(car._id, parsedPickup, parsedDropoff);
@@ -128,14 +123,16 @@ exports.getAllCars = async (req, res) => {
       totalPages,
     };
 
-    // 🧊 Store computed data in Redis (cache for 5 minutes)
-    await redis.setex(cacheKey, 300, JSON.stringify(response));
-
-    console.log("💾 Data cached in Redis");
+    if (isRedisConnected()) {
+      try {
+        await redis.setex(cacheKey, 300, JSON.stringify(response));
+      } catch (cacheErr) {
+        console.warn("⚠️ Redis cache write failed, continuing without cache:", cacheErr.message);
+      }
+    }
 
     res.status(200).json(response);
   } catch (err) {
-    console.error("getAllCars error:", err);
     res.status(500).json({ message: "Unable to get cars", error: err.message });
   }
 };
@@ -273,7 +270,27 @@ exports.getClientReviewsByCarId = async (req, res) => {
 // ✅ Get popular cars
 exports.getPopularCars = async (req, res) => {
   try {
-    const cars = await Car.find().populate('locationIds');
+    const cacheKey = "popularCars";
+    if (isRedisConnected()) {
+      try {
+        const cachedData = await redis.get(cacheKey);
+        if (cachedData) {
+          return res.status(200).json(JSON.parse(cachedData));
+        }
+      } catch (cacheErr) {
+        console.warn("⚠️ Redis cache read failed, skipping cache:", cacheErr.message);
+      }
+    }
+
+    const bookingsAgg = await Booking.aggregate([
+      { $match: { status: { $ne: "CANCELED" } } },
+      { $group: { _id: "$carId", bookingCount: { $sum: 1 } } },
+      { $sort: { bookingCount: -1 } },
+      { $limit: 3 },
+    ]);
+
+    const carIds = bookingsAgg.map(b => b._id);
+    const cars = await Car.find({ _id: { $in: carIds } }).populate("locationIds");
 
     const todayStart = startOfDay(new Date());
     const todayEnd = endOfDay(new Date());
@@ -281,15 +298,15 @@ exports.getPopularCars = async (req, res) => {
     const content = await Promise.all(
       cars.map(async (car) => {
         const status = await checkAvailability(car._id, todayStart, todayEnd);
-        const firstLocation = car.locationIds[0];
+        const firstLocation = car.locationIds?.[0];
         const locationText = firstLocation
           ? `${firstLocation.locationName}, ${firstLocation.locationAddress}`
-          : 'Unknown';
+          : "Unknown";
 
         return {
           carId: car._id,
           model: car.model,
-          imageUrl: car.images[0] || '',
+          imageUrl: car.images?.[0] || "",
           pricePerDay: car.pricePerDay,
           carRating: car.carRating?.toFixed(1) || "0.0",
           serviceRating: car.serviceRating?.toFixed(1) || "0.0",
@@ -299,10 +316,18 @@ exports.getPopularCars = async (req, res) => {
       })
     );
 
-    res.status(200).json({ content });
+    const response = { content };
 
+    if (isRedisConnected()) {
+      try {
+        await redis.setex(cacheKey, 300, JSON.stringify(response));
+      } catch (cacheErr) {
+        console.warn("⚠️ Redis cache write failed, continuing without cache:", cacheErr.message);
+      }
+    }
+
+    res.status(200).json(response);
   } catch (err) {
-    console.error('getPopularCars error:', err);
-    res.status(500).json({ message: 'Failed to fetch cars.' });
+    res.status(500).json({ message: "Failed to fetch popular cars.", error: err.message });
   }
 };

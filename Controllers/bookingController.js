@@ -1,11 +1,10 @@
 const Booking = require('../Models/Bookings_model');
 const Car = require('../Models/Cars_model');
 const User = require('../Models/Users_model');
-const Location = require('../Models/Locations_model');
 const moment = require('moment');
 const mongoose = require('mongoose');
 const { createAndSendNotification } = require('../config/SendGrid_Config');
-const redis = require("../config/Redis_Connect");
+const { redis, isRedisConnected } = require("../config/Redis_Connect");
 
 const formatDate = (isoDate) => {
   const date = new Date(isoDate);
@@ -47,60 +46,47 @@ const getAllBookings = async (req, res) => {
 const getUserBookings = async (req, res) => {
   try {
     const { userId } = req.params;
-
-    // ✅ Validate userId
-    if (!mongoose.Types.ObjectId.isValid(userId)) {
-      return res.status(400).json({ error: "Invalid userId format." });
-    }
-
-    // 🔑 Create Redis cache key
     const cacheKey = `userBookings:${userId}`;
 
-    // ✅ Check if data is cached
-    const cachedBookings = await redis.get(cacheKey);
-    if (cachedBookings) {
-      console.log("📦 Serving user bookings from Redis cache");
-      return res.status(200).json(JSON.parse(cachedBookings));
+    if (isRedisConnected()) {
+      try {
+        const cachedBookings = await redis.get(cacheKey);
+        if (cachedBookings) {
+          return res.status(200).json(JSON.parse(cachedBookings));
+        } else {
+          console.log("🚫 No cache found for key:", cacheKey);
+        }
+      } catch (cacheErr) {
+        console.warn("⚠️ Redis cache read failed:", cacheErr.message);
+      }
     }
 
-    // ✅ Check user existence
-    const userExists = await User.exists({ _id: userId });
-    if (!userExists) {
-      return res.status(404).json({ error: "User not found." });
-    }
-
-    // ✅ Fetch from DB
     const bookings = await Booking.find({ clientId: userId })
       .populate("carId", "_id images model")
       .sort({ createdAt: -1 })
       .lean();
 
-    if (!bookings || bookings.length === 0) {
-      return res.status(204).json({ error: "No bookings found for this user" });
-    }
-
-    // ✅ Format response
-    const formatted = bookings.map((booking) => {
-      const pickup = new Date(booking.pickupDateTime);
-      return {
-        bookingId: booking._id.toString(),
-        carId: booking.carId?._id,
-        bookingStatus: booking.status,
-        carImageUrl: booking.carId?.images?.[0] || "",
-        carModel: booking.carId?.model || "Unknown",
-        orderDetails: `#${booking.bookingNumber} (${moment(pickup).format("DD.MM.YYYY")})`,
-      };
-    });
+    const formatted = bookings.map((booking) => ({
+      bookingId: booking._id.toString(),
+      carId: booking.carId?._id,
+      bookingStatus: booking.status,
+      carImageUrl: booking.carId?.images?.[0] || "",
+      carModel: booking.carId?.model || "Unknown",
+      orderDetails: `#${booking.bookingNumber} (${moment(booking.pickupDateTime).format("DD.MM.YYYY")})`,
+    }));
 
     const response = { content: formatted };
 
-    // 🧊 Store data in Redis for 10 minutes
-    await redis.setex(cacheKey, 600, JSON.stringify(response));
-    console.log("💾 User bookings cached in Redis");
+    if (isRedisConnected()) {
+      try {
+        await redis.setex(cacheKey, 600, JSON.stringify(response));
+      } catch (cacheErr) {
+        console.warn("⚠️ Redis cache write failed:", cacheErr.message);
+      }
+    }
 
-    res.status(200).json(response);
+    return res.status(200).json(response);
   } catch (err) {
-    console.error("getUserBookings error:", err);
     res.status(500).json({ error: err.message });
   }
 };
@@ -233,6 +219,15 @@ const createBooking = async (req, res) => {
       status: 'BOOKED',
     });
 
+    if (isRedisConnected()) {
+      const cacheKey = `userBookings:${clientId}`;
+      try {
+        await redis.del(cacheKey);
+      } catch (cacheErr) {
+        console.warn(`⚠️ Failed to delete Redis cache for ${cacheKey}:`, cacheErr.message);
+      }
+    }
+
     const bookingDateFormatted = moment(pickup).format('DD.MM.YY');
     const message = `New booking was successfully created.\n${car.model} is booked for ${moment(pickup).format('MMM D')} - ${moment(dropoff).format('MMM D')}.\nYou can change booking details until 10:30 PM ${moment(pickup).format('D MMM')}.\nYour order: #${nextBookingNumber} (${bookingDateFormatted})`;
 
@@ -289,6 +284,17 @@ const cancelBooking = async (req, res) => {
       };
       await booking.save();
 
+      // 🧹 Invalidate Redis cache for this user's bookings
+      if (isRedisConnected()) {
+        const cacheKey = `userBookings:${booking.clientId}`;
+        try {
+          await redis.del(cacheKey);
+          console.log(`🧹 Cache invalidated for key: ${cacheKey}`);
+        } catch (cacheErr) {
+          console.warn(`⚠️ Failed to delete Redis cache for ${cacheKey}:`, cacheErr.message);
+        }
+      }
+
       // Send notification
       (async () => {
         try {
@@ -322,6 +328,17 @@ const cancelBooking = async (req, res) => {
         };
         await booking.save();
 
+        // 🧹 Invalidate Redis cache for this user's bookings
+        if (isRedisConnected()) {
+          const cacheKey = `userBookings:${booking.clientId}`;
+          try {
+            await redis.del(cacheKey);
+            console.log(`🧹 Cache invalidated for key: ${cacheKey}`);
+          } catch (cacheErr) {
+            console.warn(`⚠️ Failed to delete Redis cache for ${cacheKey}:`, cacheErr.message);
+          }
+        }
+
         (async () => {
           try {
             await createAndSendNotification({
@@ -343,7 +360,9 @@ const cancelBooking = async (req, res) => {
 
       // If within 12 hours → cancel immediately
       if (booking.clientId.toString() !== userId) {
-        return res.status(403).json({ error: "You are not authorized to cancel this booking" });
+        return res
+          .status(403)
+          .json({ error: "You are not authorized to cancel this booking" });
       }
 
       const car = await Car.findById(booking.carId).select("model");
@@ -351,6 +370,17 @@ const cancelBooking = async (req, res) => {
 
       booking.status = "CANCELED";
       await booking.save();
+
+      // 🧹 Invalidate Redis cache for this user's bookings
+      if (isRedisConnected()) {
+        const cacheKey = `userBookings:${booking.clientId}`;
+        try {
+          await redis.del(cacheKey);
+          console.log(`🧹 Cache invalidated for key: ${cacheKey}`);
+        } catch (cacheErr) {
+          console.warn(`⚠️ Failed to delete Redis cache for ${cacheKey}:`, cacheErr.message);
+        }
+      }
 
       (async () => {
         try {
@@ -376,6 +406,7 @@ const cancelBooking = async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 };
+
 
 
 // ✅ Get booking details

@@ -1,20 +1,38 @@
-// config/redisClient.js
 const Redis = require("ioredis");
 
-// Create a new Redis client instance
-// Assuming your Redis container is accessible via 'localhost' on port 6379
-// If using Docker Compose, use the service name instead of 'localhost' (e.g., 'redis')
-const redis = new Redis({
-  host: "localhost",
-  port: 6379,
-});
+let redis = null;
+let connected = false;
 
-redis.on("connect", () => {
-  console.log("✅ Connected to Redis successfully");
-});
+try {
+  redis = new Redis({
+    host: "localhost",
+    port: 6379,
+    retryStrategy: (times) => {
+      if (times > 3) return null;
+      return Math.min(times * 200, 2000);
+    },
+  });
 
-redis.on("error", (err) => {
-  console.error("❌ Redis connection error:", err);
-});
+  redis.on("connect", () => {
+    connected = true;
+    console.log("✅ Connected to Redis successfully");
+  });
 
-module.exports = redis;
+  redis.on("error", (err) => {
+    if (connected) console.error("⚠️ Redis error:", err.message);
+    else console.warn("⚠️ Redis unavailable, continuing without cache");
+    connected = false;
+  });
+
+  redis.on("end", () => {
+    if (connected) console.warn("⚠️ Redis connection closed");
+    connected = false;
+  });
+
+} catch (error) {
+  console.warn("⚠️ Redis unavailable, continuing without cache");
+}
+
+const isRedisConnected = () => connected;
+
+module.exports = { redis, isRedisConnected };

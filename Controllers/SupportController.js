@@ -3,6 +3,7 @@ const User = require("../Models/Users_model");
 const { File } = require("megajs");
 const Car = require("../Models/Cars_model");
 const { createAndSendNotification } = require('../config/SendGrid_Config');
+const { redis, isRedisConnected } = require("../config/Redis_Connect");
 const moment = require('moment');
 
 const getFileInfo = async (fileUrl) => {
@@ -154,6 +155,15 @@ exports.reservationController = async (req, res) => {
     // 5. Update booking status
     booking.status = status;
     await booking.save();
+
+    if (isRedisConnected()) {
+      const cacheKey = `userBookings:${booking.clientId}`;
+      try {
+        await redis.del(cacheKey);
+      } catch (cacheErr) {
+        console.warn(`⚠️ Failed to delete Redis cache for ${cacheKey}:`, cacheErr.message);
+      }
+    }
 
     // 6. Prepare notification content
     let title, message;
