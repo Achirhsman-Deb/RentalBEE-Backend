@@ -141,6 +141,21 @@ exports.getAllCars = async (req, res) => {
 exports.getCarById = async (req, res) => {
   try {
     const { carId } = req.params;
+
+    const cacheKey = `car:${carId}`;
+    const carListKey = `car:cache:list`;
+
+    if (isRedisConnected()) {
+      try {
+        const cachedData = await redis.get(cacheKey);
+        if (cachedData) {
+          return res.status(200).json(JSON.parse(cachedData));
+        }
+      } catch (cacheErr) {
+        console.warn("⚠️ Redis read failed:", cacheErr.message);
+      }
+    }
+
     const car = await Car.findById(carId);
 
     if (!car) return res.status(404).json({ message: 'Car not found' });
@@ -154,7 +169,7 @@ exports.getCarById = async (req, res) => {
       ? `${firstLocation.locationName}, ${firstLocation.locationAddress}`
       : 'Unknown';
 
-    res.status(200).json({
+    const response = {
       carId: car._id,
       carRating: car.carRating,
       climateControlOption: car.climateControlOption,
@@ -170,7 +185,26 @@ exports.getCarById = async (req, res) => {
       pricePerDay: car.pricePerDay,
       serviceRating: car.serviceRating,
       status,
-    });
+    };
+
+    if (isRedisConnected()) {
+      try {
+        await redis.setex(cacheKey, 3600, JSON.stringify(response));
+        await redis.lpush(carListKey, carId);
+        await redis.lrem(carListKey, -1, carId);
+        const listSize = await redis.llen(carListKey);
+        if (listSize > 5) {
+          const oldestCarId = await redis.rpop(carListKey);
+          if (oldestCarId) {
+            await redis.del(`car:${oldestCarId}`);
+          }
+        }
+      } catch (cacheErr) {
+        console.warn("⚠️ Redis write failed:", cacheErr.message);
+      }
+    }
+
+    return res.status(200).json(response);
 
   } catch (err) {
     console.error('getCarById error:', err);
