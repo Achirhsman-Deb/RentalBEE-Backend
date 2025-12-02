@@ -486,8 +486,8 @@ const editBooking = async (req, res) => {
       return res.status(403).json({ error: 'You are not authorized to edit this booking.' });
     }
 
-    if (booking.status !== 'RESERVED') {
-      return res.status(400).json({ error: `Cannot edit booking with status "${booking.status}". Only "RESERVED" bookings can be edited.` });
+    if (booking.status !== 'BOOKED') {
+      return res.status(400).json({ error: `Cannot edit booking with status "${booking.status}". Only booked bookings can be edited.` });
     }
 
     const { pickupDateTime, dropoffDateTime, pickupLocationId, dropoffLocationId } = body;
@@ -543,6 +543,7 @@ const editBooking = async (req, res) => {
     await booking.save();
     res.json({ message: 'Your booking has been successfully updated' });
   } catch (err) {
+    console.log(err)
     res.status(500).json({ error: err.message });
   }
 };

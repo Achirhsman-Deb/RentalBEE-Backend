@@ -2,14 +2,16 @@ const express = require("express");
 require("dotenv").config();
 const cors = require("cors");
 const helmet = require("helmet");
+const cookieParser = require("cookie-parser");
 const { connectToDatabase } = require("./config/Mongo_Connect");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+app.use(cors({ origin: "http://localhost:5173",credentials: true, allowedHeaders: "Content-Type,Authorization" }));
 
 // Middleware
 app.use(helmet());
-app.use(cors({ origin: "*", allowedHeaders: "Content-Type,Authorization" }));
+app.use(cookieParser());
 app.use(express.json());
 
 // Connect to MongoDB once at startup
