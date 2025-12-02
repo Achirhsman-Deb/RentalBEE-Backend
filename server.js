@@ -7,7 +7,7 @@ const { connectToDatabase } = require("./config/Mongo_Connect");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-app.use(cors({ origin: "http://localhost:5173",credentials: true, allowedHeaders: "Content-Type,Authorization" }));
+app.use(cors({ origin: "https://rental-bee-frontend.vercel.app",credentials: true, allowedHeaders: "Content-Type,Authorization" }));
 
 // Middleware
 app.use(helmet());
