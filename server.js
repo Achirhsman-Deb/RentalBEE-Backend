@@ -2,11 +2,13 @@ const express = require("express");
 require("dotenv").config();
 const cors = require("cors");
 const helmet = require("helmet");
+const rateLimit = require("express-rate-limit");
 const cookieParser = require("cookie-parser");
 const { connectToDatabase } = require("./config/Mongo_Connect");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+app.set('trust proxy', 1);
 app.use(cors({ origin: "https://rental-bee-frontend.vercel.app",credentials: true, allowedHeaders: "Content-Type,Authorization" }));
 
 // Middleware
@@ -14,6 +16,22 @@ app.use(helmet());
 app.use(cookieParser());
 app.use(express.json());
 
+const globalLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 50,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: "Too many requests from this IP, please try again later."
+});
+
+//for auth speciallu
+const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    message: "Too many login attempts, please try again after 15 minutes."
+});
+
+app.use(globalLimiter);
 // Connect to MongoDB once at startup
 connectToDatabase()
     .then(() => console.log("Connected to MongoDB"))
@@ -23,7 +41,7 @@ connectToDatabase()
     });
 
 // Routes
-app.use("/auth", require("./Routes/auth"));
+app.use("/auth",authLimiter, require("./Routes/auth"));
 app.use("/home", require("./Routes/home"));
 app.use("/cars", require("./Routes/cars"));
 app.use("/bookings", require("./Routes/bookings"));
@@ -35,7 +53,7 @@ app.use("/support", require("./Routes/Support"));
 
 // Default route
 app.get("/", (req, res) => {
-    res.status(200).json({ message: "Hello" });
+    res.status(200).json({ message: "Hello from server" });
 });
 
 // Error handling middleware
