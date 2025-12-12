@@ -18,7 +18,7 @@ app.use(express.json());
 
 const globalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 50,
+    max: 1000,
     standardHeaders: true,
     legacyHeaders: false,
     message: "Too many requests from this IP, please try again later."
@@ -27,7 +27,7 @@ const globalLimiter = rateLimit({
 //for auth speciallu
 const authLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 10,
+    max: 50,
     message: "Too many login attempts, please try again after 15 minutes."
 });
 

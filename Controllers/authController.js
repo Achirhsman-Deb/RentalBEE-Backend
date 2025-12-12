@@ -4,11 +4,14 @@ const User = require("../Models/Users_model");
 const EmailVerification = require("../Models/EmailVarification_Model");
 const RefreshToken = require("../Models/RefreshToken_model");
 const { createAndSendNotification, sendMail } = require("../config/SendGrid_Config");
-const axios = require("axios")
+const axios = require("axios");
+const { OAuth2Client } = require('google-auth-library');
+const crypto = require('crypto');
 
 // --- VALIDATION HELPERS (Same as before) ---
 const isLatin = (str) => /^[A-Za-z\s]+$/.test(str.trim());
 const emailRegex = /^[a-zA-Z0-9_%+-]+(\.[a-zA-Z0-9_%+-]+)*@[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)*\.[a-zA-Z]{2,}$/;
+const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 const validateUserData = (data) => {
   const errors = {};
@@ -275,6 +278,7 @@ exports.sendOtpController = async (req, res, next) => {
   try {
     const { email, captchaToken, type } = req.body;
     const lowerEmail = email.trim().toLowerCase();
+    console.log("SendGrid Key:", process.env.SENDGRID_API_KEY);
 
     // Verify captcha
     const captchaRes = await verifyCaptcha(captchaToken);
@@ -289,11 +293,9 @@ exports.sendOtpController = async (req, res, next) => {
     // Check if already registered
     const existingUser = await User.findOne({ email: lowerEmail });
     if (existingUser && type == "Registration") {
-      console.log(1)
       return res.status(409).json({ error: "Email already registered" });
     }
     if (!existingUser && type == "ForgotPassword") {
-      console.log(2)
       return res.status(409).json({ error: "Invalid Email or user dosen't exist" });
     }
 
@@ -306,7 +308,7 @@ exports.sendOtpController = async (req, res, next) => {
     } else {
       // Generate new OTP
       const otp = Math.floor(100000 + Math.random() * 900000).toString();
-      const expiresAt = Date.now() + 15 * 60 * 1000; // 15 min
+      const expiresAt = Date.now() + 15 * 60 * 1000;
 
       // Upsert OTP doc
       await EmailVerification.findOneAndUpdate(
@@ -369,5 +371,90 @@ exports.forgotPasswordController = async (req, res) => {
   } catch (err) {
     console.error("Forgot Password Error:", err);
     return res.status(500).json({ statusCode: 500, message: "Internal server error", error: err.message });
+  }
+};
+
+exports.googleAuthController = async (req, res) => {
+  try {
+    const { credential } = req.body; 
+
+    const ticket = await client.verifyIdToken({
+      idToken: credential,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+    const payload = ticket.getPayload();
+    
+    const email = payload.email;
+    const googleId = payload.sub;
+    const firstName = payload.given_name || "User";
+    const lastName = payload.family_name || "";
+    const picture = payload.picture;
+
+    let user = await User.findOne({ email: email }).select("+passwordHash");
+
+    if (!user) {
+      const randomPassword = crypto.randomBytes(16).toString('hex');
+      const passwordHash = await bcrypt.hash(randomPassword, 12);
+
+      user = await User.create({
+        email: email,
+        firstName: capitalizeWords(firstName),
+        lastName: capitalize(lastName),
+        passwordHash,
+        imageUrl: picture,
+        isGoogleAuth: true,
+        aadhaarCard: { status: "UNVERIFIED" },
+        drivingLicense: { status: "UNVERIFIED" }
+      });
+
+      (async () => {
+        try {
+            await createAndSendNotification({
+              userId: user._id, title: "Welcome to RentalBEE 🎉", message: "Welcome via Google!", type: "info"
+            });
+        } catch (e) { console.error(e); }
+      })();
+    }
+
+    const { accessToken, refreshToken } = generateTokens(user._id.toString());
+
+    await RefreshToken.create({ userId: user._id, token: refreshToken });
+
+    sendCookies(res, accessToken, refreshToken);
+    let overallStatus = "UNVERIFIED";
+    let changed = false;
+
+    if (!user.aadhaarCard) { user.aadhaarCard = { status: "UNVERIFIED" }; changed = true; }
+    if (!user.drivingLicense) { user.drivingLicense = { status: "UNVERIFIED" }; changed = true; }
+    if (!user.aadhaarCard.documentUrl) { changed = true; user.aadhaarCard.status = "UNVERIFIED"; }
+    if (!user.drivingLicense.documentUrl) { changed = true; user.drivingLicense.status = "UNVERIFIED"; }
+    
+    if (changed) await user.save();
+    
+    if (user.aadhaarCard?.status === "VERIFIED" && user.drivingLicense?.status === "VERIFIED") {
+        overallStatus = "VERIFIED";
+    }
+    return res.status(200).json({
+      statusCode: 200,
+      body: {
+        role: user.role || "user",
+        userId: user._id.toString(),
+        username: user.firstName + " " + (user.lastName || ""),
+        email: user.email,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        phoneNumber: user.phoneNumber,
+        country: user.country,
+        city: user.city,
+        street: user.street,
+        postalCode: user.postalCode,
+        imageUrl: user.imageUrl || picture,
+        status: overallStatus
+      },
+    });
+
+  } catch (err) {
+    console.error("Google Auth Error:", err);
+    return res.status(401).json({ message: "Google authentication failed" });
   }
 };
